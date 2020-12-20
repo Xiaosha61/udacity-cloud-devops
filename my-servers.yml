@@ -1,0 +1,192 @@
+Description: >
+  Xiaosha - servers / Udagram 2020
+Parameters:
+  # Parameters are entirely optional.
+  # but using them will make your cloudformation templates more reusable
+  # use them for things that may change over time, such as instance type,
+  # VPCs and so on.
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+
+Resources:
+  # ------------------- IAM settings -------------------- # 
+  # instance profile contains the IAM Role name(s) that we want to associate to our auto scaling EC2 Servers
+  # never give too much permissions to your EC2 instances! if they get hacked, the permissions get hacked also!
+  # in this example, I create a Role called MyS3ReadOnlyRole and just give it a policy of S3 Read-Only Access
+  MyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: "/"
+      Roles:
+        - Ref: MyS3ReadOnlyRole # Ref gets the role's full path: StackName-MyS3ReadOnlyRole-RandomSuffix
+  
+  MyS3ReadOnlyPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: MyS3ReadOnlyPolicy
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Action:
+          - s3:List*
+          Resource: "*"
+      Roles:
+      - Ref: MyS3ReadOnlyRole # attach as this role's inline policy
+
+  MyS3ReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+  
+  # ------------------- SecurityGroup for EC2 and LB -------------------- # 
+  MyLBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to my LB
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0 # allow all to access 80 http
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0 # allow 80 to send outbound traffic
+  MyWebServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our hosts and SSH from local only
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 8080
+        ToPort: 8080
+        CidrIp: 0.0.0.0/0 # allow all to access 8080 http
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0 # allow all to access 22 (ssh) - for testing only
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0 # allow all ports to send outbound traffic
+
+  # ------------------- EC2 Launch config, needs secGroup & subnets -------------------- # 
+  # Sample UserData
+  # When creating your Launch Configuration, you may need a UserData script
+  # here's one that you can use for Ubuntu Linux that will:
+  # Install Apache Web Server, Start it, and create an index.html that will be displayed
+  # when you visit the IP address of this server with your web browser
+  MyWebAppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      UserData: # Change to whatever s3 bucket the code is hosted at
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          aws s3 cp s3://xiaosha-website/xiaosha-website.zip .
+          unzip -o xiaosha-website.zip
+          echo "Udacity Demo Web Server Up and Running!" > index.html
+      ImageId: ami-005bdb005fb00e791 # ubuntu1804, found in EC2/Images/AMIs
+      IamInstanceProfile: !Ref MyInstanceProfile
+      SecurityGroups:
+      - Ref: MyWebServerSecGroup
+      InstanceType: t3.small
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'    
+
+  # ------------------- Auto Scaling -------------------- # 
+  MyWebAppGroup: # defines what to launch, how much to launch, where to launch
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: 
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS" 
+      LaunchConfigurationName: 
+        Ref: MyWebAppLaunchConfig
+      MaxSize: '4'
+      MinSize: '1'  
+      TargetGroupARNs:
+      - Ref: MyWebAppTargetGroup # defines health check rules
+  
+  MyELBListener: # defines which port observes traffic from outside internet
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: 
+          Ref: MyWebAppTargetGroup
+      LoadBalancerArn: !Ref MyWebAppLB
+      Port: 80
+      Protocol: HTTP    
+      
+  ALBListenerRule: # defines where MyELBListener is forwarding the traffic to.
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule 
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'MyWebAppTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'MyELBListener' 
+      Priority: 1
+
+  MyWebAppTargetGroup: # defines ELB health check rules
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPCID"  
+
+  MyWebAppLB: # defines ELB's location and secGroup
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      SecurityGroups:
+      - Ref: MyLBSecGroup
+      Subnets: # ELB has replicas too, in both Public subnets
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"  
+
+# Outputs: 
+  # This is also optional.
+  # Bonus points for useful outputs!
+  # for example, if you create a Load Balancer
+  # it's nice to output the URL to it here, so that we don't have to go to the console to get it.
+  # WebAppLoadBalancerDNS:
+  #   Description: Public DNS URL of my ELB
+  #   Value: !Join [ "", [ 'http://', !GetAtt MyWebAppLB.DNSName ]]
+  #   Export:
+  #     Name: !Sub ${EnvironmentName}-LB-DNS-NAME 
+
+  
