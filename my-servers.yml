@@ -30,6 +30,7 @@ Resources:
         - Effect: Allow
           Action:
           - s3:List*
+          - s3:Get"
           Resource: "*"
       Roles:
       - Ref: MyS3ReadOnlyRole # attach as this role's inline policy
@@ -49,23 +50,23 @@ Resources:
       Path: "/"
   
   # ------------------- SecurityGroup for EC2 and LB -------------------- # 
-  MyLBSecGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Allow http to my LB
-      VpcId:
-        Fn::ImportValue:
-          !Sub "${EnvironmentName}-VPCID"
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        FromPort: 80
-        ToPort: 80
-        CidrIp: 0.0.0.0/0 # allow all to access 80 http
-      SecurityGroupEgress:
-      - IpProtocol: tcp
-        FromPort: 80
-        ToPort: 80
-        CidrIp: 0.0.0.0/0 # allow 80 to send outbound traffic
+  # MyLBSecGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: Allow http to my LB
+  #     VpcId:
+  #       Fn::ImportValue:
+  #         !Sub "${EnvironmentName}-VPCID"
+  #     SecurityGroupIngress:
+  #     - IpProtocol: tcp
+  #       FromPort: 80
+  #       ToPort: 80
+  #       CidrIp: 0.0.0.0/0 # allow all to access 80 http
+  #     SecurityGroupEgress:
+  #     - IpProtocol: tcp
+  #       FromPort: 80
+  #       ToPort: 80
+  #       CidrIp: 0.0.0.0/0 # allow 80 to send outbound traffic
   MyWebServerSecGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -75,9 +76,9 @@ Resources:
           !Sub "${EnvironmentName}-VPCID"
       SecurityGroupIngress:
       - IpProtocol: tcp
-        FromPort: 8080
-        ToPort: 8080
-        CidrIp: 0.0.0.0/0 # allow all to access 8080 http
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0 # allow all to access 80 http
       - IpProtocol: tcp
         FromPort: 22
         ToPort: 22
@@ -104,55 +105,61 @@ Resources:
           apt-get install unzip awscli -y
           apt-get install apache2 -y
           systemctl start apache2.service
+          # I had to run manually `sudo dpkg --configure -a` to fix apache2's config file: /etc/apache2/apache2.conf
+          # may be a problem of t2.micro
+          # systemctl status apache2.service # check if apache2 is started
+          # sudo lsof -PiTCP -sTCP:LISTEN # check if 80 is running as a listener
           cd /var/www/html
-          aws s3 cp s3://xiaosha-website/xiaosha-website.zip .
-          unzip -o xiaosha-website.zip
-          echo "Udacity Demo Web Server Up and Running!" > index.html
-      ImageId: ami-005bdb005fb00e791 # ubuntu1804, found in EC2/Images/AMIs
+          # need sudo for accessing fs inside /var/www/html
+          sudo aws s3 cp s3://xiaosha-website/xiaosha-website.zip .
+          sudo unzip -o xiaosha-website.zip
+          # http://ec2-54-190-33-204.us-west-2.compute.amazonaws.com/xiaosha-website/
+      ImageId: ami-026c8acd92718196b # ubuntu1804, found in EC2/Images/AMIs
       IamInstanceProfile: !Ref MyInstanceProfile
       SecurityGroups:
       - Ref: MyWebServerSecGroup
-      InstanceType: t3.small
+      InstanceType: t2.micro
+      KeyName: test-ssh-key-pair
       BlockDeviceMappings:
       - DeviceName: "/dev/sdk"
         Ebs:
-          VolumeSize: '10'    
+          VolumeSize: '2'    
 
   # ------------------- Auto Scaling -------------------- # 
   MyWebAppGroup: # defines what to launch, how much to launch, where to launch
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       VPCZoneIdentifier: 
-      - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS" 
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN" 
       LaunchConfigurationName: 
         Ref: MyWebAppLaunchConfig
-      MaxSize: '4'
+      MaxSize: '1'
       MinSize: '1'  
       TargetGroupARNs:
       - Ref: MyWebAppTargetGroup # defines health check rules
   
-  MyELBListener: # defines which port observes traffic from outside internet
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      DefaultActions:
-      - Type: forward
-        TargetGroupArn: 
-          Ref: MyWebAppTargetGroup
-      LoadBalancerArn: !Ref MyWebAppLB
-      Port: 80
-      Protocol: HTTP    
+  # MyELBListener: # defines which port observes traffic from outside internet
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     DefaultActions:
+  #     - Type: forward
+  #       TargetGroupArn: 
+  #         Ref: MyWebAppTargetGroup
+  #     LoadBalancerArn: !Ref MyWebAppLB
+  #     Port: 80
+  #     Protocol: HTTP    
       
-  ALBListenerRule: # defines where MyELBListener is forwarding the traffic to.
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule 
-    Properties:
-      Actions:
-      - Type: forward
-        TargetGroupArn: !Ref 'MyWebAppTargetGroup'
-      Conditions:
-      - Field: path-pattern
-        Values: [/]
-      ListenerArn: !Ref 'MyELBListener' 
-      Priority: 1
+  # ALBListenerRule: # defines where MyELBListener is forwarding the traffic to.
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule 
+  #   Properties:
+  #     Actions:
+  #     - Type: forward
+  #       TargetGroupArn: !Ref 'MyWebAppTargetGroup'
+  #     Conditions:
+  #     - Field: path-pattern
+  #       Values: [/]
+  #     ListenerArn: !Ref 'MyELBListener' 
+  #     Priority: 1
 
   MyWebAppTargetGroup: # defines ELB health check rules
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -169,14 +176,14 @@ Resources:
         Fn::ImportValue:
           Fn::Sub: "${EnvironmentName}-VPCID"  
 
-  MyWebAppLB: # defines ELB's location and secGroup
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      SecurityGroups:
-      - Ref: MyLBSecGroup
-      Subnets: # ELB has replicas too, in both Public subnets
-      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
-      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"  
+  # MyWebAppLB: # defines ELB's location and secGroup
+  #   Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+  #   Properties:
+  #     SecurityGroups:
+  #     - Ref: MyLBSecGroup
+  #     Subnets: # ELB has replicas too, in both Public subnets
+  #     - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+  #     - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"  
 
 # Outputs: 
   # This is also optional.
