@@ -114,7 +114,7 @@ Resources:
           sudo aws s3 cp s3://xiaosha-website/xiaosha-website.zip .
           sudo unzip -o xiaosha-website.zip
           # http://ec2-54-190-33-204.us-west-2.compute.amazonaws.com/xiaosha-website/
-      ImageId: ami-026c8acd92718196b # ubuntu1804, found in EC2/Images/AMIs
+      ImageId: ami-005bdb005fb00e791 # ubuntu1804, found in EC2/Images/AMIs
       IamInstanceProfile: !Ref MyInstanceProfile
       SecurityGroups:
       - Ref: MyWebServerSecGroup
